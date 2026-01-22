@@ -51,9 +51,47 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
             const info = await getAuth()
             if (info.type !== "oauth") return fetch(request, init)
 
-            const { isVision, isAgent } = iife(() => {
+            const { isVision, isAgent, isClaude } = iife(() => {
               try {
                 const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body
+
+                let isClaude: boolean = false
+                let updatedBody: boolean = false
+                if (body.model?.toLowerCase()?.startsWith("claude-")) {
+                  isClaude = true
+
+                  // Get model data and cap thinking budget at max output tokens - 1
+                  const modelData = provider?.models?.[body.model]
+                  const maxOutputTokens = modelData?.limit.output
+                  const targetThinkingBudget = 4000
+                  if (targetThinkingBudget) {
+                    // Capped at (max output tokens - 1) to be same as the VSCode Copilot extension
+                    body["thinking_budget"] = maxOutputTokens
+                      ? Math.min(targetThinkingBudget, maxOutputTokens - 1)
+                      : targetThinkingBudget
+                  }
+
+                  updatedBody = true
+                }
+
+                // Maximum 4 blocks of cache control is allowed for Claude models
+                if (isClaude && body?.messages) {
+                  let cacheCount = 0
+                  for (const m of body.messages) {
+                    if (m?.copilot_cache_control?.type == "ephemeral") {
+                      cacheCount += 1
+                      if (cacheCount > 4) {
+                        delete m.copilot_cache_control
+                      }
+                    }
+                  }
+
+                  updatedBody = true
+                }
+
+                if (updatedBody && init) {
+                  init.body = JSON.stringify(body)
+                }
 
                 // Completions API
                 if (body?.messages) {
@@ -64,6 +102,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
                         Array.isArray(msg.content) && msg.content.some((part: any) => part.type === "image_url"),
                     ),
                     isAgent: last?.role !== "user",
+                    isClaude,
                   }
                 }
 
@@ -76,10 +115,11 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
                         Array.isArray(item?.content) && item.content.some((part: any) => part.type === "input_image"),
                     ),
                     isAgent: last?.role !== "user",
+                    isClaude,
                   }
                 }
               } catch {}
-              return { isVision: false, isAgent: false }
+              return { isVision: false, isAgent: false, isClaude: false }
             })
 
             const headers: Record<string, string> = {
@@ -87,7 +127,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
               ...(init?.headers as Record<string, string>),
               "User-Agent": `opencode/${Installation.VERSION}`,
               Authorization: `Bearer ${info.refresh}`,
-              "Openai-Intent": "conversation-edits",
+              "Openai-Intent": isClaude ? "conversation-agent" : "conversation-edits",
             }
 
             if (isVision) {
